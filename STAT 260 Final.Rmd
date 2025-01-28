@@ -1,0 +1,158 @@
+---
+title: "Final Report"
+author: "Alyssa Alvarez and Ilan Carter"
+output: pdf_document
+date: "2024-02-25"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(survey)
+library(ggplot2)
+library(tidyverse)
+```
+
+```{r, import data}
+nychvs_csv_import <- 
+  #imports data (all code in this chunk is from the NYCHVS reference website)
+    function( this_url ){
+  	 
+   	 tf <- tempfile()
+  	 
+   	 download.file( this_url , tf , mode = 'wb' )
+  	 
+   	 this_df <- read.csv( tf )
+  	 
+   	 names( this_df ) <- tolower( names( this_df ) )
+  	 
+   	 this_df
+    }
+
+datasets_url <- "https://www2.census.gov/programs-surveys/nychvs/datasets/2021/microdata/" 
+#link to the data
+
+all_units_df <-
+    nychvs_csv_import( paste0( datasets_url , "allunits_puf_21.csv" ) ) 
+#creates data set for all units (occupied + vacant)
+
+occupied_units_df <-
+    nychvs_csv_import( paste0( datasets_url , "occupied_puf_21.csv" ) ) 
+#creates data set for all occupied units
+
+person_df <-
+    nychvs_csv_import( paste0( datasets_url , "person_puf_21.csv" ) ) 
+#creates data set for all individuals surveyed
+
+vacant_units_df <-
+    nychvs_csv_import( paste0( datasets_url , "vacant_puf_21.csv" ) ) 
+#creates data set for all vacant units
+
+stopifnot( nrow( all_units_df ) == nrow( occupied_units_df ) + nrow( vacant_units_df ) ) 
+
+before_nrow <- nrow( occupied_units_df )
+
+occupied_units_df <- merge( all_units_df , occupied_units_df )
+
+stopifnot( nrow( occupied_units_df ) == before_nrow )
+
+before_nrow <- nrow( vacant_units_df )
+
+vacant_units_df <- merge( all_units_df , vacant_units_df )
+
+stopifnot( nrow( vacant_units_df ) == before_nrow )
+
+before_nrow <- nrow( person_df )
+
+weighting_variables <- grep( "^fw([0-9]+)?$" , names( occupied_units_df ) , value = TRUE ) 
+#creates weighting variables
+
+person_df <-
+    merge(
+   	 occupied_units_df[ setdiff( names( occupied_units_df ) , weighting_variables ) ] ,
+   	 person_df
+    )
+
+stopifnot( nrow( person_df ) == before_nrow )
+
+all_units_df[ , 'one' ] <- occupied_units_df[ , 'one' ] <-
+    vacant_units_df[ , 'one' ] <- person_df[ , 'one' ] <- 1
+```
+
+```{r, data wrangling and design objects}
+occupied_units_df_graphing <- occupied_units_df %>% 
+  #data wrangling to clean up the data visualizations
+  filter(!grent %in% c(-2, -1)) %>% 
+  #removes cases of no reporting and of $0 because they own the unit
+  filter(!pa_any == -1) %>% 
+  #removes cases of no reporting
+  mutate(boro = case_when(boro == 1 ~ "Bronx", 
+                          boro == 2 ~ "Brooklyn", 
+                          boro == 3 ~ "Manhattan", 
+                          boro == 4 ~ "Queens", 
+                          boro == 5 ~ "Staten Island")) %>% 
+  #renames the boro variable to have names of each borough showing
+  mutate(pa_any = case_when(pa_any == 2 ~ "No Public Benefits",
+                            pa_any == 1 ~ "1+ Types of Public Benefits")) 
+#renames variables to identify whether or not the unit is receiving public assistance
+
+occupied_units_design_graphing <- 
+  #creates design object based on the tidy data set (from NYCHVS reference website)
+    svrepdesign(
+   	 weight = ~fw ,
+   	 repweights = 'fw[0-9]+' ,
+   	 scale = 4 / 80 ,
+   	 rscales = rep( 1 , 80 ) ,
+   	 mse = TRUE ,
+   	 type = 'JK1' ,
+   	 data = occupied_units_df_graphing)
+
+nychvs_design <- 
+  #creates design object based on the original data set (from NYCHVS reference website)
+    svrepdesign(
+   	 weight = ~fw ,
+   	 repweights = 'fw[0-9]+' ,
+   	 scale = 4 / 80 ,
+   	 rscales = rep( 1 , 80 ) ,
+   	 mse = TRUE ,
+   	 type = 'JK1' ,
+   	 data = occupied_units_df)
+
+nychvs_design <- update( 
+  #data wrangling for the design object (from NYCHVS reference website)
+    nychvs_design,
+    one = 1,
+    yearly_household_income = hhinc_rec1,
+    rent_amount = ifelse( rent_amount == -2 , NA , rent_amount),
+    borough =
+   		 factor( boro , levels = 1:5 , labels =
+       		 c( 'Bronx' , 'Brooklyn' , 'Manhattan' ,
+       		 'Queens' , 'Staten Island')),
+   	 assist = ifelse(rentassist == 1, 1, 0))
+```
+
+```{r, graphing}
+ggplot(occupied_units_df_graphing, aes(weight = fw, x=boro, fill = as.factor(pa_any))) + 
+  #creates stacked barplot to show weighted proportions of the units receiving public benefits
+  geom_bar(position = "fill") +
+  labs(x = "Borough", y = "Weighted Proportions", 
+       title = "Amount of Public Assistance by Borough", fill = "Public Assistance Status")
+
+svyboxplot(log(hhinc_rec1) ~ factor(boro), xlab = "Boroughs",
+           ylab = "Log of Total Household Income", occupied_units_design_graphing)
+#creates boxplot of the total household income across boroughs
+#log of y-axis for ease of interpretation
+svyboxplot(log(grent) ~ factor(boro), xlab = "Boroughs", 
+           ylab = "Log of Gross Rent", occupied_units_design_graphing)
+#creates boxplot of the gross rent across boroughs 
+#log of y-axis for ease of interpretation
+```
+
+```{r, estimates}
+svyby(~ grent + hhinc_rec1 + assist, ~borough, nychvs_design, svymean, na.rm=TRUE) 
+#creates a table of estimated means & SEs for all 3 of our variables of interest, by borough
+
+tapply(occupied_units_df_graphing$hhinc_rec1, occupied_units_df_graphing$boro, summary) 
+#table provides more exact information about boxplot for total household income
+tapply(occupied_units_df_graphing$grent, occupied_units_df_graphing$boro, summary) 
+#table provides more exact information about boxplot for gross rent
+```
